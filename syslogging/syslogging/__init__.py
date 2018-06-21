@@ -1,5 +1,10 @@
 from abc import ABC, abstractclassmethod
-import sys, time, getpass
+import sys, os, time, getpass
+# Import smtplib for the actual sending function
+import smtplib
+# Import the email modules we'll need
+from email.mime.text import MIMEText
+
 class LogLevel:
     INFO = 0
     DEBUG = 10
@@ -118,7 +123,12 @@ class Logger:
             sys.stderr.write("Erorr. Log message can not be None\n")
             return 1
         log_record = LogRecord(level=level, msg=msg)
-        print(self.formatter.format(log_record))
+        log_msg = self.formatter.format(log_record)
+        # print(self.formatter.format(log_record))
+        for level, dispatchers in self.registryDipatchers.items():
+            if level == log_record.level:
+                for dispatcher in dispatchers:
+                    dispatcher.log(log_msg)
 
 class Dispatcher(ABC):
     @abstractclassmethod
@@ -127,4 +137,61 @@ class Dispatcher(ABC):
 
 class ConsoleDispatcher(Dispatcher): 
     def log(self, log_msg):
-        print(log_msg)
+        try: 
+            print(log_msg)
+            return 0
+        except Exception as e:
+            sys.stderr.write('Failed to log to file: '+str(e))
+            return 1
+
+class FileDispatcher(Dispatcher):
+    _DEFAULT_MODULE_FOLDER = '.syslogging'
+    _DEFAULT_LOG_FOLDER = '{}/log'.format(_DEFAULT_MODULE_FOLDER)
+    _DEFAULT_LOG_FILE = 'default.log'
+
+    def __init__(self, pathname=None):
+        if not os.path.exists(self._DEFAULT_MODULE_FOLDER):
+            os.mkdir(self._DEFAULT_MODULE_FOLDER)
+        if not os.path.exists(self._DEFAULT_LOG_FOLDER):
+            os.mkdir(self._DEFAULT_LOG_FOLDER) 
+        self.pathname = '{}/{}'.format(self._DEFAULT_LOG_FOLDER, self._DEFAULT_LOG_FILE) if pathname is None else pathname
+
+    def log(self, log_msg):
+        try:
+            file = open(self.pathname, "a+")
+            file.write('{}\n'.format(log_msg))
+            return 0
+        except Exception as e:
+            sys.stderr.write('Failed to log to file: '+str(e))
+            return 1
+
+class EmailDispatcher(Dispatcher):
+    def __init__(self, mail_list=None):
+        if not self.valid_mail_list:
+            raise ValueError("Mail must be a string or a list")
+        self.mail_list = mail_list
+
+    def valid_mail_list(self, mail_list):
+        return True
+
+    def log(self, log_msg):
+        if self.mail_list is None:
+            sys.stderr.write("WARNING. There's no mail list to log!")
+            return 1
+        msg = MIMEText(log_msg)
+
+        # me == the sender's email address
+        # you == the recipient's email address
+        msg['Subject'] = '[SYSLOGGING]'
+        msg['From'] = 'nguyendinhmanh11k58@gmail.com'
+        msg['To'] = 'nguyendinhmanh11k58@gmail.com'
+
+        # Send the message via our own SMTP server, but don't include the
+        # envelope header.
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login("manhnddev11@gmail.com", "")
+        server.sendmail('manhnddev11@gmail.com', self.mail_list, msg.as_string())
+        server.quit()
