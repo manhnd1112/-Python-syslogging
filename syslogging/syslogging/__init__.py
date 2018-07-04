@@ -4,6 +4,7 @@ import sys, os, time, getpass
 import smtplib
 # Import the email modules we'll need
 from email.mime.text import MIMEText
+from multiprocessing import Process, Queue
 
 class LogLevel:
     INFO = 0
@@ -34,7 +35,30 @@ class LogLevel:
 
     @staticmethod
     def get_level_name(level):
-        return LogLevel._level2name[level]
+        try:
+            return LogLevel._level2name[level]
+        except Exception as e:
+            sys.stderr.write('Erorr. Log level {} doesn\'t exits\n'.format(level))
+            sys.stderr.write(str(e))            
+            return None
+
+    @staticmethod
+    def get_level_by_name(name):
+        try:
+            return LogLevel._name2level[name.lower()]
+        except Exception as e:
+            sys.stderr.write('Error. There\'s no log level of level name {}'.format(name))
+            sys.stderr.write(str(e))
+            return None
+
+class LogRecord: 
+    def __init__(self, name='', level=LogLevel.INFO, msg=''):
+        self.name = name
+        self.level = level
+        self.level_name = LogLevel.get_level_name(self.level)
+        self.message = msg
+        self.username = getpass.getuser()
+        self.created_at = time.time()
 
 class Formatter:
     _STYLES = {
@@ -47,6 +71,7 @@ class Formatter:
     percent_time_search = '%(created_at)'
     strformat_time_search = '{created_at}'
     loggername_search = ['%(logger_name)', '{logger_name}']
+    log_record_to_check_valid_fmt = LogRecord()
 
     def __init__(self, fmt=None, datefmt='%Y-%m-%d %H:%M:%S', style=_STYLES['PERCENT']):
         self.datefmt = datefmt
@@ -64,26 +89,28 @@ class Formatter:
         return time.strftime(self.datefmt, ct)
 
     def format(self, record):
+        if not self.valid_format():
+            return None
         if self.use_time():
             record.created_at = self.format_datetime(record)
-
         if self.style == self._STYLES['PERCENT']:
             return self.fmt % record.__dict__
         elif self.style == self._STYLES['STRFORMAT']:
             return self.fmt.format(**record.__dict__)
         else:
-            sys.stderr.write("Error. Format style {} doesn't exit".format(self.style))
+            sys.stderr.write("Error. Format style {} doesn't exit\n".format(self.style))
             return None
-
-class LogRecord: 
-    def __init__(self, name='', level=LogLevel.INFO, msg=''):
-        self.name = name
-        self.level = level
-        self.level_name = LogLevel.get_level_name(self.level)
-        self.message = msg
-        self.username = getpass.getuser()
-        self.created_at = time.time()
-
+    
+    def valid_format(self):
+        try:
+            if self.style == self._STYLES['PERCENT']:
+                self.fmt % self.log_record_to_check_valid_fmt.__dict__
+            elif self.style == self._STYLES['STRFORMAT']:
+                self.fmt.format(**self.log_record_to_check_valid_fmt.__dict__)
+            return True
+        except Exception as e: 
+            return False
+        
 class Logger:
     """
     Instances of the Logger class represent a single logging channel
@@ -111,8 +138,9 @@ class Logger:
             if level in self.registryDipatchers and dispatcher in self.registryDipatchers[level]:
                 self.registryDipatchers[level].remove(dispatcher)
             return 0
-        except Exception:
-            sys.stderr.write('Something wrong!\n')
+        except Exception as e:
+            sys.stderr.write('Something wrong when deattach dispatcher!\n')
+            sys.stderr.write(str(e))
             return 1       
 
     def log(self, level, msg):
@@ -124,12 +152,13 @@ class Logger:
             return 1
         log_record = LogRecord(level=level, msg=msg)
         log_msg = self.formatter.format(log_record)
-        # print(self.formatter.format(log_record))
         for level, dispatchers in self.registryDipatchers.items():
             if level == log_record.level:
                 for dispatcher in dispatchers:
-                    dispatcher.log(log_msg)
-
+                    return dispatcher.log(log_msg)
+        sys.stderr.write('Erorr. Log level or dispatcher don\'t work.')
+        return 1
+        
 class Dispatcher(ABC):
     @abstractclassmethod
     def log(self, log_msg):
@@ -166,32 +195,62 @@ class FileDispatcher(Dispatcher):
             return 1
 
 class EmailDispatcher(Dispatcher):
-    def __init__(self, mail_list=None):
-        if not self.valid_mail_list:
+    def __init__(self, from_username, from_pass, to_mail_list=None):
+        if not self.valid_to_mail_list_param:
             raise ValueError("Mail must be a string or a list")
-        self.mail_list = mail_list
+        self.from_username = from_username
+        self.from_pass = from_pass
+        self.to_mail_list = to_mail_list
+        self.get_to_mail_list()
+        print(self.to_mail_list)
 
-    def valid_mail_list(self, mail_list):
-        return True
+        mail_server = smtplib.SMTP('smtp.gmail.com', 587)
+        mail_server.ehlo()
+        mail_server.starttls()
+        mail_server.ehlo()
+        mail_server.login(self.from_username, from_pass)
+        self.mail_server = mail_server
+        self.msg_queue = Queue()
+        #process check queue & send mail
+        p_send_mail = Process(target=self.send_mail)
+        p_send_mail.start()
+
+    def valid_to_mail_list_param(self):
+        return self.to_mail_list != None and isinstance(self.to_mail_list, (str, list,))
+
+    def get_to_mail_list(self):
+        try: 
+            if isinstance(self.to_mail_list, str):
+                self.to_mail_list = self.to_mail_list.split(',')
+                return 0
+            elif isinstance(self.to_mail_list, list):
+                self.to_mail_list = list
+                return 0
+            return None
+        except Exception as e:
+            sys.stderr.write('Error. Some erorrs has occured when extract to_mail_list')
+            sys.stderr.write(str(e))
+            return None
 
     def log(self, log_msg):
-        if self.mail_list is None:
-            sys.stderr.write("WARNING. There's no mail list to log!")
+        if not self.valid_to_mail_list_param():
+            sys.stderr.write('Error. Mail list not valid')            
             return 1
-        msg = MIMEText(log_msg)
-
-        # me == the sender's email address
-        # you == the recipient's email address
-        msg['Subject'] = '[SYSLOGGING]'
-        msg['From'] = 'nguyendinhmanh11k58@gmail.com'
-        msg['To'] = 'nguyendinhmanh11k58@gmail.com'
-
-        # Send the message via our own SMTP server, but don't include the
-        # envelope header.
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login("manhnddev11@gmail.com", "")
-        server.sendmail('manhnddev11@gmail.com', self.mail_list, msg.as_string())
-        server.quit()
+        self.msg_queue.put(log_msg)
+        return 0
+    
+    def send_mail(self):
+        try:
+            while True:
+                log_msg = self.msg_queue.get()
+                msg = MIMEText(log_msg)
+                msg['Subject'] = '[SYSLOGGING]'
+                msg['From'] = self.from_username
+                msg['to'] = self.from_username
+                msg['cc'] = self.to_mail_list
+                print(log_msg)
+                self.mail_server.sendmail(self.from_username, self.to_mail_list, msg.as_string())
+                self.mail_server.quit()
+        except Exception as e:
+            print(str(e))
+            return None
