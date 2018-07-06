@@ -4,6 +4,7 @@ import sys, os, time, getpass
 import smtplib
 # Import the email modules we'll need
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from multiprocessing import Process, Queue
 
 class LogLevel:
@@ -38,7 +39,7 @@ class LogLevel:
         try:
             return LogLevel._level2name[level]
         except Exception as e:
-            sys.stderr.write('Erorr. Log level {} doesn\'t exits\n'.format(level))
+            sys.stderr.write('Error. Log level {} doesn\'t exits\n'.format(level))
             sys.stderr.write(str(e))            
             return None
 
@@ -52,7 +53,8 @@ class LogLevel:
             return None
 
 class LogRecord: 
-    def __init__(self, name='', level=LogLevel.INFO, msg=''):
+    def __init__(self, logger_name='', name='', level=LogLevel.INFO, msg=''):
+        self.logger_name = logger_name
         self.name = name
         self.level = level
         self.level_name = LogLevel.get_level_name(self.level)
@@ -70,7 +72,6 @@ class Formatter:
     _converter = time.localtime
     percent_time_search = '%(created_at)'
     strformat_time_search = '{created_at}'
-    loggername_search = ['%(logger_name)', '{logger_name}']
     log_record_to_check_valid_fmt = LogRecord()
 
     def __init__(self, fmt=None, datefmt='%Y-%m-%d %H:%M:%S', style=_STYLES['PERCENT']):
@@ -90,6 +91,7 @@ class Formatter:
 
     def format(self, record):
         if not self.valid_format():
+
             return None
         if self.use_time():
             record.created_at = self.format_datetime(record)
@@ -109,6 +111,8 @@ class Formatter:
                 self.fmt.format(**self.log_record_to_check_valid_fmt.__dict__)
             return True
         except Exception as e: 
+            sys.stderr.write("Error. Formater's format isn't valid.\n")
+            sys.stderr.write(str(e)+'\n')
             return False
         
 class Logger:
@@ -122,7 +126,7 @@ class Logger:
 
     def attach_dispatcher(self, level, dispatcher):
         if not LogLevel.valid_level(level):
-            sys.stderr.write("Erorr. Log level {} doesn't exits\n".format(level))
+            sys.stderr.write("Error. Log level {} doesn't exits\n".format(level))
             return 1
         if level not in self.registryDipatchers:
             self.registryDipatchers[level] = set([])
@@ -132,7 +136,7 @@ class Logger:
 
     def deattach_dispatcher(self, level, dispatcher):
         if not LogLevel.valid_level(level):
-            sys.stderr.write("Erorr. Log level {} doesn't exits\n".format(level))
+            sys.stderr.write("Error. Log level {} doesn't exits\n".format(level))
             return 1
         try:
             if level in self.registryDipatchers and dispatcher in self.registryDipatchers[level]:
@@ -143,22 +147,21 @@ class Logger:
             sys.stderr.write(str(e))
             return 1       
 
-    def log(self, level, msg):
+    def log(self, level, msg, name=''):
         if not LogLevel.valid_level(level):
-            sys.stderr.write("Erorr. Log level {} doesn't exits\n".format(level))
+            sys.stderr.write("Error. Log level {} doesn't exits\n".format(level))
             return 1
         if msg is None:
-            sys.stderr.write("Erorr. Log message can not be None\n")
+            sys.stderr.write("Error. Log message can not be None\n")
             return 1
-        log_record = LogRecord(level=level, msg=msg)
+        log_record = LogRecord(logger_name=self.name, name=name, level=level, msg=msg)
         log_msg = self.formatter.format(log_record)
         for level, dispatchers in self.registryDipatchers.items():
             if level == log_record.level:
                 for dispatcher in dispatchers:
-                    return dispatcher.log(log_msg)
-        sys.stderr.write('Erorr. Log level or dispatcher don\'t work.')
-        return 1
-        
+                    dispatcher.log(log_msg)
+        return 0
+
 class Dispatcher(ABC):
     @abstractclassmethod
     def log(self, log_msg):
@@ -174,29 +177,28 @@ class ConsoleDispatcher(Dispatcher):
             return 1
 
 class FileDispatcher(Dispatcher):
-    _DEFAULT_MODULE_FOLDER = '.syslogging'
-    _DEFAULT_LOG_FOLDER = '{}/log'.format(_DEFAULT_MODULE_FOLDER)
-    _DEFAULT_LOG_FILE = 'default.log'
+    _DEFAULT_MODULE_FOLDER_PATH = '/home/{}/.syslogging'.format(getpass.getuser())
+    _DEFAULT_LOG_FOLDER_PATH = '{}/log'.format(_DEFAULT_MODULE_FOLDER_PATH)
+    _DEFAULT_LOG_FILE_PATH = 'default.log'
 
     def __init__(self, pathname=None):
-        if not os.path.exists(self._DEFAULT_MODULE_FOLDER):
-            os.mkdir(self._DEFAULT_MODULE_FOLDER)
-        if not os.path.exists(self._DEFAULT_LOG_FOLDER):
-            os.mkdir(self._DEFAULT_LOG_FOLDER) 
-        self.pathname = '{}/{}'.format(self._DEFAULT_LOG_FOLDER, self._DEFAULT_LOG_FILE) if pathname is None else pathname
+        if not os.path.exists(self._DEFAULT_LOG_FOLDER_PATH):
+            os.makedirs(self._DEFAULT_LOG_FOLDER_PATH)
+        self.pathname = '{}/{}'.format(self._DEFAULT_LOG_FOLDER_PATH, self._DEFAULT_LOG_FILE_PATH) if pathname is None else pathname
 
     def log(self, log_msg):
         try:
             file = open(self.pathname, "a+")
             file.write('{}\n'.format(log_msg))
+            file.close()
             return 0
         except Exception as e:
             sys.stderr.write('Failed to log to file: '+str(e))
             return 1
 
-class EmailDispatcher(Dispatcher):
+class MailDispatcher(Dispatcher):
     def __init__(self, from_username, from_pass, to_mail_list=None):
-        if not self.valid_to_mail_list_param:
+        if not self.valid_to_mail_list(to_mail_list):
             raise ValueError("Mail must be a string or a list")
         self.from_username = from_username
         self.from_pass = from_pass
@@ -215,8 +217,8 @@ class EmailDispatcher(Dispatcher):
         p_send_mail = Process(target=self.send_mail)
         p_send_mail.start()
 
-    def valid_to_mail_list_param(self):
-        return self.to_mail_list != None and isinstance(self.to_mail_list, (str, list,))
+    def valid_to_mail_list(self, to_mail_list):
+        return to_mail_list != None and isinstance(to_mail_list, (str, list,))
 
     def get_to_mail_list(self):
         try: 
@@ -224,16 +226,15 @@ class EmailDispatcher(Dispatcher):
                 self.to_mail_list = self.to_mail_list.split(',')
                 return 0
             elif isinstance(self.to_mail_list, list):
-                self.to_mail_list = list
                 return 0
             return None
         except Exception as e:
-            sys.stderr.write('Error. Some erorrs has occured when extract to_mail_list')
+            sys.stderr.write('Error. Some Errors has occured when extract to_mail_list')
             sys.stderr.write(str(e))
             return None
 
     def log(self, log_msg):
-        if not self.valid_to_mail_list_param():
+        if not self.valid_to_mail_list(self.to_mail_list):
             sys.stderr.write('Error. Mail list not valid')            
             return 1
         self.msg_queue.put(log_msg)
@@ -243,13 +244,14 @@ class EmailDispatcher(Dispatcher):
         try:
             while True:
                 log_msg = self.msg_queue.get()
-                msg = MIMEText(log_msg)
+                # msg = MIMEText(log_msg)
+                msg = MIMEMultipart()
                 msg['Subject'] = '[SYSLOGGING]'
                 msg['From'] = self.from_username
-                msg['to'] = self.from_username
-                msg['cc'] = self.to_mail_list
+                # msg['to'] = self.from_username
+                msg['Bcc'] = ",".join(self.to_mail_list)
                 print(log_msg)
-                self.mail_server.sendmail(self.from_username, self.to_mail_list, msg.as_string())
+                self.mail_server.sendmail(self.from_username, [self.from_username] + self.to_mail_list, msg.as_string())
                 self.mail_server.quit()
         except Exception as e:
             print(str(e))
